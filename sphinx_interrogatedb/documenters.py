@@ -1,82 +1,25 @@
+__all__ = [
+    "TypeDocumenter", "FunctionDocumenter", "MakeSeqDocumenter",
+    "ElementDocumenter",
+]
+
 from sphinx.ext import autodoc
 from sphinx.util import logging
 from sphinx.locale import _, __
 from panda3d.interrogatedb import *
-import inspect
+import types
+import builtins
 
-from . import mangle
+from . import idb
 
 logger = logging.getLogger(__name__)
 
+# These constants are used by get_object_members to flag members of interrogate
+# types that should be handled by the respective documenters in this module.
 ITYPE = object()
 IFUNC = object()
 IELEM = object()
-
-
-def is_interrogate_module(modname):
-    """Returns true if the given module is an interrogate module."""
-
-    for i in range(interrogate_number_of_global_types()):
-        itype = interrogate_get_global_type(i)
-        if interrogate_type_module_name(itype) == modname:
-            return True
-
-    return False
-
-
-def transformed_type_name(env, itype, scoped=False):
-    """Given an interrogate type index, returns the name of the type as it
-    should be presented to Python users."""
-
-    while interrogate_type_is_wrapped(itype):
-        itype = interrogate_type_wrapped_type(itype)
-
-    if scoped and interrogate_type_is_nested(itype):
-        parent = interrogate_type_outer_class(itype)
-        return transformed_type_name(env, parent, scoped=True) \
-            + '.' \
-            + transformed_type_name(env, itype)
-
-    type_name = interrogate_type_name(itype)
-    if type_name in ("PyObject", "_object"):
-        return "object"
-    elif type_name in ("PN_stdfloat", "double"):
-        return "float"
-
-    if interrogate_type_is_atomic(itype):
-        token = interrogate_type_atomic_token(itype)
-        if token == 7:
-            return 'str'
-        else:
-            return type_name
-
-    new_name = env.app and \
-        env.app.emit_firstresult('interrogate-transform-type-name', type_name)
-    if new_name is not None:
-        return new_name
-
-    if env.app.config.autodoc_interrogatedb_mangle_type_names:
-        return mangle.mangle_type_name(type_name)
-
-    return type_name
-
-
-def transformed_function_name(env, ifunc, scoped=False):
-    if scoped:
-        parent = interrogate_function_class(ifunc)
-        if parent:
-            return transformed_type_name(env, parent) + '.' + transformed_function_name(env, ifunc)
-
-    func_name = interrogate_function_name(ifunc)
-    new_name = env.app and \
-        env.app.emit_firstresult('interrogate-transform-function-name', func_name)
-    if new_name is not None:
-        return new_name
-
-    if env.app.config.autodoc_interrogatedb_mangle_function_names:
-        return mangle.mangle_function_name(func_name)
-
-    return func_name
+IMSEQ = object()
 
 
 class TypeDocumenter(autodoc.ClassDocumenter):
@@ -84,7 +27,8 @@ class TypeDocumenter(autodoc.ClassDocumenter):
     Interrogate type.
     """
 
-    # objtype MUST be 'class' for autosummary to list it.
+    # We override the built-in handler for "class", and dispatch down to the
+    # base class for types outside of interrogate modules.
     objtype = 'class'
     directivetype = 'class'
 
@@ -97,46 +41,38 @@ class TypeDocumenter(autodoc.ClassDocumenter):
             # Nested type
             return True
 
-        if not isinstance(member, type):
-            return False
-
-        if not is_interrogate_module(member.__module__):
-            return False
-
-        if isinstance(parent, cls):
-            return True
-        elif isinstance(parent, autodoc.ModuleDocumenter):
-            return member.__module__ == parent.name
-        else:
-            return False
+        return super().can_document_member(member, membername, isattr, parent)
 
     def import_object(self):
         """Looks up the object in the interrogate database, storing the type
         index in self.itype.  Returns True if found, False otherwise."""
 
-        scoped_name = '.'.join(self.objpath)
+        if not idb.has_module(self.modname):
+            # Not an interrogate type; the base class should handle this one.
+            self.__class__ = autodoc.ClassDocumenter
+            return autodoc.ClassDocumenter.import_object(self)
 
-        for i in range(interrogate_number_of_types()):
-            itype = interrogate_get_type(i)
-            if interrogate_type_module_name(itype) == self.modname and \
-               transformed_type_name(self.env, itype, scoped=True) == scoped_name:
-                self.itype = itype
-                self.doc_as_attr = False
-                return True
+        itype = idb.lookup_type(self.modname, self.objpath)
+        if not itype:
+            logger.warning("failed to find type '%s' in interrogate database" % (self.fullname), type='autodoc')
+            return False
 
-        logger.warning("failed to find '%s' in interrogate database for module '%s'" % (scoped_name, self.modname), type='autodoc')
-        return False
+        # Unwrap typedef.
+        while interrogate_type_is_typedef(itype):
+            itype = interrogate_type_wrapped_type(itype)
+
+        self.itype = itype
+
+        # Document as an attribute if this is just an alias to the "real" name.
+        real_name = idb.get_type_name(itype, mangle=self.env.config.autodoc_interrogatedb_mangle_type_names)
+        self.doc_as_attr = (real_name != self.objpath[-1])
+        return True
 
     def get_real_modname(self):
         return interrogate_type_module_name(self.itype)
 
     def check_module(self):
-        #if self.options.imported_members:
-        #    return True
-        assert False
-
-        modname = interrogate_type_module_name(self.itype)
-        return modname == self.modname
+        return self.get_real_modname() == self.modname
 
     def format_args(self, **kwargs):
         # We don't bother putting constructor args in the class signature;
@@ -156,15 +92,16 @@ class TypeDocumenter(autodoc.ClassDocumenter):
         else:
             super().add_directive_header(sig)
 
-        if self.options.show_inheritance:
+        if not self.doc_as_attr and self.options.show_inheritance:
             self.add_line('', sourcename)
 
             nderivs = interrogate_type_number_of_derivations(self.itype)
             if nderivs > 0:
                 bases = [
-                    ':class:`%s`' % transformed_type_name(
-                        self.env,
-                        interrogate_type_get_derivation(self.itype, i)
+                    ':class:`%s`' % idb.get_type_name(
+                        interrogate_type_get_derivation(self.itype, i),
+                        scoped=True,
+                        mangle=self.env.config.autodoc_interrogatedb_mangle_type_names,
                     ) for i in range(nderivs)
                 ]
                 self.add_line('   ' + _('Bases: %s') % ', '.join(bases),
@@ -174,9 +111,19 @@ class TypeDocumenter(autodoc.ClassDocumenter):
         return [interrogate_type_comment(self.itype).splitlines() + ['']]
 
     def add_content(self, more_content, no_docstring=False):
-        super().add_content(more_content, no_docstring)
-
         sourcename = self.get_sourcename()
+
+        if self.doc_as_attr:
+            # Document as alias.
+            real_name = idb.get_type_name(
+                self.itype,
+                scoped=True,
+                mangle=self.env.config.autodoc_interrogatedb_mangle_type_names)
+
+            self.add_line(_('alias of :class:`%s`') % real_name, sourcename)
+            return
+
+        super().add_content(more_content, no_docstring)
 
         if interrogate_type_is_enum(self.itype):
             for i in range(interrogate_type_number_of_enum_values(self.itype)):
@@ -194,88 +141,132 @@ class TypeDocumenter(autodoc.ClassDocumenter):
     def get_object_members(self, want_all):
         ret = []
 
-        for i in range(interrogate_type_number_of_constructors(self.itype)):
-            ifunc = interrogate_type_get_constructor(self.itype, i)
+        if interrogate_type_number_of_constructors(self.itype) > 0:
             ret.append(('__init__', IFUNC))
+
+        mangle_types = self.env.config.autodoc_interrogatedb_mangle_type_names
+        mangle_funcs = self.env.config.autodoc_interrogatedb_mangle_function_names
 
         for i in range(interrogate_type_number_of_methods(self.itype)):
             ifunc = interrogate_type_get_method(self.itype, i)
-            ret.append((transformed_function_name(self.env, ifunc), IFUNC))
+            ret.append((idb.get_function_name(ifunc, mangle=mangle_funcs), IFUNC))
 
         for i in range(interrogate_type_number_of_make_seqs(self.itype)):
             iseq = interrogate_type_get_make_seq(self.itype, i)
-            ret.append((interrogate_make_seq_seq_name(iseq), IFUNC))
+            ret.append((idb.get_make_seq_name(iseq, mangle=mangle_funcs), IMSEQ))
 
         for i in range(interrogate_type_number_of_elements(self.itype)):
             ielem = interrogate_type_get_element(self.itype, i)
-            ret.append((interrogate_element_name(ielem), IELEM))
+            ret.append((idb.get_element_name(ielem), IELEM))
 
         for i in range(interrogate_type_number_of_nested_types(self.itype)):
             itype2 = interrogate_type_get_nested_type(self.itype, i)
-            ret.append((transformed_type_name(self.env, itype2), ITYPE))
+            if not interrogate_type_name(itype2):
+                #FIXME: pull constants from anonymous enums
+                continue
+            ret.append((idb.get_type_name(itype2, mangle=mangle_types), ITYPE))
 
         return False, ret
 
 
-class FunctionDocumenter(autodoc.ModuleLevelDocumenter):
+class FunctionDocumenter(autodoc.FunctionDocumenter):
     """
     Interrogate function.
     """
 
     objtype = 'function'
-    directivetype = 'method'
+    directivetype = 'function'
 
     # Rank this higher than the built-in documenters.
     priority = 20
 
     @classmethod
     def can_document_member(cls, member, membername, isattr, parent):
-        return member is IFUNC
+        if member is IFUNC:
+            # Method.
+            return True
+
+        return super().can_document_member(member, membername, isattr, parent)
 
     def import_object(self):
-        """Looks up the object in the interrogate database, storing the type
-        index in self.ifunc.  Returns True if found, False otherwise."""
+        """Looks up the function in the interrogate database, storing the
+        function index in self.ifunc.  Returns True if found, False otherwise.
+        """
 
-        module_name = self.modname
-        if self.objpath[-1] == '__init__':
-            scoped_name = '.'.join(self.objpath[:-1] + [self.objpath[-2]])
-        else:
-            scoped_name = '.'.join(self.objpath)
+        ifunc = idb.lookup_function(self.modname, self.objpath)
+        if not ifunc:
+            logger.warning("failed to find function '%s' in interrogate database" % (self.fullname), type='autodoc')
+            return False
 
-        for i in range(interrogate_number_of_functions()):
-            ifunc = interrogate_get_function(i)
-            if interrogate_function_module_name(ifunc) == module_name and \
-               transformed_function_name(self.env, ifunc, scoped=True) == scoped_name:
-                self.ifunc = ifunc
-                return True
-
-        logger.warning("failed to find '%s' in interrogate database for module '%s'" % (scoped_name, module_name), type='autodoc')
-        return False
+        self.ifunc = ifunc
+        if len(self.objpath) > 0:
+            self.objtype = 'method'
+            self.directivetype = 'method'
+        return True
 
     def get_real_modname(self):
         return interrogate_function_module_name(self.ifunc)
 
     def check_module(self):
-        modname = interrogate_function_module_name(self.ifunc)
-        return modname == self.modname
+        return self.get_real_modname() == self.modname
 
     def format_args(self, iwrap, **kwargs):
+        # NB. If you get this error:
+        # format_args() missing 1 required positional argument: 'iwrap'
+        # ...then the problem is that this function raised a TypeError, which
+        # Sphinx takes to mean that it should call this again without any
+        # arguments passed in.
+
+        show_types = self.env.config.autodoc_interrogatedb_type_annotations
+
         sig = "("
         for i in range(interrogate_wrapper_number_of_parameters(iwrap)):
             if not interrogate_wrapper_parameter_is_this(iwrap, i):
                 if sig != "(":
                     sig += ", "
                 sig += interrogate_wrapper_parameter_name(iwrap, i)
-                sig += " : "
-                sig += transformed_type_name(self.env, interrogate_wrapper_parameter_type(iwrap, i))
+                if show_types:
+                    sig += ": "
+                    sig += self._format_arg_type(interrogate_wrapper_parameter_type(iwrap, i))
         sig += ")"
 
-        if self.objpath[-1] != '__init__' and interrogate_wrapper_has_return_value(iwrap):
-            sig += " -> " + transformed_type_name(self.env, interrogate_wrapper_return_type(iwrap))
-        else:
-            sig += " -> None"
+        if show_types:
+            if self.objpath[-1] != '__init__' and interrogate_wrapper_has_return_value(iwrap):
+                sig += " -> " + self._format_arg_type(interrogate_wrapper_return_type(iwrap))
+            else:
+                sig += " -> None"
 
         return sig
+
+    def _format_arg_type(self, itype):
+        # Unwrap the type.
+        while interrogate_type_is_wrapped(itype):
+            itype = interrogate_type_wrapped_type(itype)
+
+        orig_name = interrogate_type_name(itype)
+        if orig_name in ("PyObject", "_object"):
+            return "object"
+        elif orig_name in ("PN_stdfloat", "double"):
+            return "float"
+        elif orig_name == "vector_uchar":
+            return "bytes"
+
+        if interrogate_type_is_atomic(itype):
+            token = interrogate_type_atomic_token(itype)
+            if token == 1:
+                return 'int'
+            elif token == 2 or token == 3:
+                return 'float'
+            elif token == 4:
+                return 'bool'
+            elif token == 7:
+                return 'str'
+            elif token == 8:
+                return 'int'
+
+        return idb.get_type_name(
+            itype,
+            mangle=self.env.config.autodoc_interrogatedb_mangle_type_names)
 
     def add_directive_header(self, sig):
         super().add_directive_header(sig)
@@ -283,7 +274,7 @@ class FunctionDocumenter(autodoc.ModuleLevelDocumenter):
         sourcename = self.get_sourcename()
 
         # If one overload is a staticmethod, all of them are.
-        if self.objpath[-1] == '__init__':
+        if len(self.objpath) <= 1 or self.objpath[-1] == '__init__':
             is_static = False
         else:
             is_static = True
@@ -311,6 +302,16 @@ class FunctionDocumenter(autodoc.ModuleLevelDocumenter):
                 self.name, type='autodoc')
             return
 
+        if not idb.has_module(self.modname):
+            # Not an interrogate module.  Pass on to parent.
+            self.__class__ = autodoc.FunctionDocumenter
+            return autodoc.FunctionDocumenter.generate(
+                self, more_content, real_modname, check_module, all_members)
+
+        if self.objpath[-1] == 'Dtool_BorrowThisReference':
+            # Ignore this.
+            return
+
         # Grab the stuff from the interrogate database
         if not self.import_object():
             return
@@ -318,6 +319,12 @@ class FunctionDocumenter(autodoc.ModuleLevelDocumenter):
         # check __module__ of object (for members not given explicitly)
         if check_module:
             if not self.check_module():
+                return
+
+        # Do not show this if this is a mere alias.
+        if self.objpath[-1] != '__init__':
+            real_name = idb.get_function_name(self.ifunc, mangle=self.env.config.autodoc_interrogatedb_mangle_function_names)
+            if self.objpath[-1] != real_name:
                 return
 
         sourcename = self.get_sourcename()
@@ -350,7 +357,57 @@ class FunctionDocumenter(autodoc.ModuleLevelDocumenter):
             for i, line in enumerate(self.process_doc(docstrings)):
                 self.add_line(line, sourcename, i)
 
+            # Should we add an :rtype: ?
+            if self.env.config.autodoc_interrogatedb_add_rtype and \
+               self.objpath[-1] != '__init__' and \
+               interrogate_wrapper_has_return_value(iwrap):
+                itype = interrogate_wrapper_return_type(iwrap)
+                if itype:
+                    type_name = self._format_arg_type(itype)
+                    if type_name not in dir(builtins):
+                        self.add_line('', sourcename)
+                        self.add_line(":rtype: " + type_name, sourcename)
+                        self.add_line('', sourcename)
+
             self.indent = self.indent[:-len(self.content_indent)]
+
+
+class MakeSeqDocumenter(autodoc.ClassLevelDocumenter):
+    """
+    Interrogate sequence generator method.
+    """
+
+    objtype = 'imakeseq'
+    directivetype = 'method'
+
+    # Rank this higher than the built-in documenters.
+    priority = 20
+
+    @classmethod
+    def can_document_member(cls, member, membername, isattr, parent):
+        return member is IMSEQ
+
+    def import_object(self):
+        """Looks up the make-seq in the interrogate database, storing the
+        make-seq index in self.iseq.  Returns True if found, False otherwise.
+        """
+
+        iseq = idb.lookup_make_seq(self.modname, self.objpath)
+        if not iseq:
+            logger.warning("failed to find make-seq '%s' in interrogate database" % (self.fullname), type='autodoc')
+            return False
+
+        self.iseq = iseq
+        return True
+
+    def format_args(self, **kwargs):
+        if self.env.config.autodoc_interrogatedb_type_annotations:
+            return "() -> list"
+        else:
+            return "()"
+
+    def get_doc(self):
+        return [interrogate_make_seq_comment(self.iseq).splitlines() + ['']]
 
 
 class ElementDocumenter(autodoc.ClassLevelDocumenter):
@@ -358,8 +415,8 @@ class ElementDocumenter(autodoc.ClassLevelDocumenter):
     Interrogate element.
     """
 
-    objtype = 'attribute'
-    directivetype = 'attribute'
+    objtype = 'ielement'
+    directivetype = 'method'
 
     # Rank this higher than the built-in documenters.
     priority = 20
@@ -369,37 +426,66 @@ class ElementDocumenter(autodoc.ClassLevelDocumenter):
         return member is IELEM
 
     def import_object(self):
-        """Looks up the object in the interrogate database, storing the type
-        index in self.ifunc.  Returns True if found, False otherwise."""
+        """Looks up the object in the interrogate database, storing the element
+        index in self.ielem.  Returns True if found, False otherwise."""
 
-        #TODO: this way of getting scoped name does not take type name
-        # transformation into account.
-        module_name = self.modname
-        type_name = '::'.join(self.objpath[:-1])
-        elem_name = self.objpath[-1]
-
-        # Find the type first.
-        itype = interrogate_get_type_by_scoped_name(type_name)
-        if not itype or interrogate_type_module_name(itype) != module_name:
-            logger.warning("failed to find '%s' in interrogate database for module '%s'" % (type_name, module_name), type='autodoc')
+        ielem = idb.lookup_element(self.modname, self.objpath)
+        if not ielem:
+            logger.warning("failed to find element '%s' in interrogate database" % (self.fullname), type='autodoc')
             return False
 
-        # Find the element under this type.
-        for i in range(interrogate_type_number_of_elements(itype)):
-            ielem = interrogate_type_get_element(itype, i)
-            if interrogate_element_name(ielem) == elem_name:
-                self.itype = itype
-                self.ielem = ielem
-                return True
+        self.ielem = ielem
+        return True
 
-        return False
+    def add_directive_header(self, sig):
+        super().add_directive_header(sig)
 
-    def get_real_modname(self):
-        return interrogate_type_module_name(self.itype)
+        sourcename = self.get_sourcename()
+        self.add_line('   :property:', sourcename)
 
-    def check_module(self):
-        modname = interrogate_type_module_name(self.itype)
-        return modname == self.modname
+    def format_args(self):
+        #XXX do we want annotations for properties?
+        #if self.env.config.autodoc_interrogatedb_type_annotations:
+        return ""
+
+        itype = interrogate_element_type(self.ielem)
+        if itype:
+            type_name = self._format_type(itype)
+            if type_name:
+                if interrogate_element_is_sequence(self.ielem):
+                    return " -> Sequence[{0}]".format(type_name)
+                else:
+                    return " -> " + type_name
+
+    def _format_type(self, itype):
+        # Unwrap the type.
+        while interrogate_type_is_wrapped(itype):
+            itype = interrogate_type_wrapped_type(itype)
+
+        orig_name = interrogate_type_name(itype)
+        if orig_name in ("PyObject", "_object"):
+            return
+        elif orig_name in ("PN_stdfloat", "double"):
+            return "float"
+        elif orig_name == "vector_uchar":
+            return "bytes"
+
+        if interrogate_type_is_atomic(itype):
+            token = interrogate_type_atomic_token(itype)
+            if token == 1:
+                return 'int'
+            elif token == 2 or token == 3:
+                return 'float'
+            elif token == 4:
+                return 'bool'
+            elif token == 7:
+                return 'str'
+            elif token == 8:
+                return 'int'
+
+        return idb.get_type_name(
+            itype,
+            mangle=self.env.config.autodoc_interrogatedb_mangle_type_names)
 
     def get_doc(self):
         docstrings = []
@@ -408,15 +494,57 @@ class ElementDocumenter(autodoc.ClassLevelDocumenter):
             elem_doc = interrogate_element_comment(self.ielem)
             docstrings.append(elem_doc.splitlines())
 
+        return docstrings
+
+    def add_content(self, more_content=[], no_docstring=False):
+        super().add_content(more_content, no_docstring)
+
+        sourcename = self.get_sourcename()
+
+        # Add the docstrings of the getter and the setter.
         if interrogate_element_has_getter(self.ielem):
             getter = interrogate_element_getter(self.ielem)
             getter_doc = interrogate_function_comment(getter)
-            docstrings.append(getter_doc.splitlines())
+        else:
+            getter_doc = ""
 
-            if interrogate_element_has_setter(self.ielem):
-                setter = interrogate_element_setter(self.ielem)
-                setter_doc = interrogate_function_comment(setter)
-                if setter_doc and setter_doc != getter_doc:
-                    docstrings.append(setter_doc.splitlines())
+        if interrogate_element_has_setter(self.ielem):
+            setter = interrogate_element_setter(self.ielem)
+            setter_doc = interrogate_function_comment(setter)
+        else:
+            setter_doc = ""
 
-        return docstrings
+        if getter_doc and setter_doc:
+            # Show both getter and setter docs if we have both.
+            self.add_line("Getter", sourcename)
+            docstrings = [getter_doc.splitlines()]
+            for line in self.process_doc(docstrings):
+                self.add_line('   ' + line, sourcename)
+
+            self.add_line("Setter", sourcename)
+            docstrings = [setter_doc.splitlines()]
+            for line in self.process_doc(docstrings):
+                self.add_line('   ' + line, sourcename)
+
+        elif getter_doc or setter_doc:
+            # If we have only one, just show it normally.
+            doc = getter_doc or setter_doc
+            docstrings = [doc.splitlines()]
+            for line in self.process_doc(docstrings):
+                self.add_line(line, sourcename)
+
+        # Add an rtype if requested.
+        if self.env.config.autodoc_interrogatedb_add_rtype:
+            itype = interrogate_element_type(self.ielem)
+            if itype:
+                type_name = self._format_type(itype)
+                if type_name:
+                    if interrogate_element_is_sequence(self.ielem):
+                        line = ":rtype: Sequence[{0}]".format(type_name)
+                    elif interrogate_element_is_mapping(self.ielem):
+                        line = ":rtype: Mapping[{0}]".format(type_name)
+                    else:
+                        line = ":rtype: " + type_name
+                    self.add_line('', sourcename)
+                    self.add_line(line, sourcename)
+                    self.add_line('', sourcename)

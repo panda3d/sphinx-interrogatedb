@@ -35,29 +35,10 @@ The following configuration options are supported:
   the way that interrogate's python-native back-end does by default.
 * `autodoc_interrogatedb_mangle_type_names`: if True, converts type names from
   snake-case to camel-case.  False by default.
-
-Events
-------
-
-To customize the names of types or functions, you can hook the
-`interrogatedb-transform-type-name` and `interrogatedb-transform-function-name`
-events.  They are given the original (un-mangled) type name.  If they return a
-string, it is assumed to be the new type name.  If they wish to leave the type
-unchanged, they should return None.
-
-For example, if you wanted to show occurrences of a type named `vector_uchar`
-as `bytes` instead, your conf.py file could look like this:
-
-```python
-
-def on_transform_type_name(app, type_name):
-    if type_name == 'vector_uchar':
-        return 'bytes'
-
-
-def setup(app):
-    app.connect('interrogatedb-transform-type-name', on_transform_type_name)
-```
+* `autodoc_interrogatedb_type_annotations`: if True, shows argument and return
+  types in function signatures using type hint syntax.  True by default.
+* `autodoc_interrogatedb_add_rtype`: if True, adds an `:rtype:` directive to
+  the bodies of docstrings with the return type.  True by default.
 
 License
 -------
