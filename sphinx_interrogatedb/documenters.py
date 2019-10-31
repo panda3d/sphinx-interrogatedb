@@ -93,12 +93,22 @@ class TypeDocumenter(autodoc.ClassDocumenter):
 
     @classmethod
     def can_document_member(cls, member, membername, isattr, parent):
-        if isinstance(member, type) and \
-           is_interrogate_module(member.__module__) and \
-           isinstance(parent, (cls, autodoc.ModuleDocumenter)):
+        if member is ITYPE:
+            # Nested type
             return True
+
+        if not isinstance(member, type):
+            return False
+
+        if not is_interrogate_module(member.__module__):
+            return False
+
+        if isinstance(parent, cls):
+            return True
+        elif isinstance(parent, autodoc.ModuleDocumenter):
+            return member.__module__ == parent.name
         else:
-            return member is ITYPE
+            return False
 
     def import_object(self):
         """Looks up the object in the interrogate database, storing the type
