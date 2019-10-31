@@ -20,7 +20,7 @@ extensions = ['sphinx.ext.autodoc', 'sphinx_interrogatedb']
 ```
 3. Configure the search path for interrogatedb files.
 ```python
-interrogate_db_search_path = ['dir/containing/in/files/']
+interrogatedb_search_path = ['dir/containing/in/files/']
 ```
 4. Just use autodoc, autosummary or [autopackagesummary](https://pypi.org/project/sphinx-autopackagesummary/)
 as you would normally, and the .in files will automatically be processed.
