@@ -40,7 +40,7 @@ def transformed_type_name(env, itype, scoped=False):
     type_name = interrogate_type_name(itype)
     if type_name in ("PyObject", "_object"):
         return "object"
-    elif type_name in ("PN_stdfloat", type_name == "double"):
+    elif type_name in ("PN_stdfloat", "double"):
         return "float"
 
     if interrogate_type_is_atomic(itype):
