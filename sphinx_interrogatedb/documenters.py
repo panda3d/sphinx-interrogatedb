@@ -514,6 +514,9 @@ class ElementDocumenter(autodoc.ClassLevelDocumenter):
         else:
             setter_doc = ""
 
+        if getter_doc or setter_doc:
+            self.add_line('', sourcename)
+
         if getter_doc and setter_doc:
             # Show both getter and setter docs if we have both.
             self.add_line("Getter", sourcename)
