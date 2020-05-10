@@ -341,6 +341,11 @@ class FunctionDocumenter(autodoc.FunctionDocumenter):
 
             # generate the directive header and options, if applicable
             self.add_directive_header(sig)
+
+            # Only the first one should be indexed, fixes a warning
+            if i > 0:
+                self.add_line('   :noindex:', sourcename)
+
             self.add_line('', sourcename)
 
             # e.g. the module directive doesn't have content
