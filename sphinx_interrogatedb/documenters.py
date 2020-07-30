@@ -64,8 +64,9 @@ class TypeDocumenter(autodoc.ClassDocumenter):
         self.itype = itype
 
         # Document as an attribute if this is just an alias to the "real" name.
-        real_name = idb.get_type_name(itype, mangle=self.env.config.autodoc_interrogatedb_mangle_type_names)
-        self.doc_as_attr = (real_name != self.objpath[-1])
+        #real_name = idb.get_type_name(itype, mangle=self.env.config.autodoc_interrogatedb_mangle_type_names)
+        #self.doc_as_attr = (real_name != self.objpath[-1])
+        self.doc_as_attr = False
         return True
 
     def get_real_modname(self):
@@ -113,13 +114,9 @@ class TypeDocumenter(autodoc.ClassDocumenter):
     def add_content(self, more_content, no_docstring=False):
         sourcename = self.get_sourcename()
 
-        if self.doc_as_attr:
+        real_name = idb.get_type_name(self.itype, mangle=self.env.config.autodoc_interrogatedb_mangle_type_names)
+        if real_name != self.objpath[-1]:
             # Document as alias.
-            real_name = idb.get_type_name(
-                self.itype,
-                scoped=True,
-                mangle=self.env.config.autodoc_interrogatedb_mangle_type_names)
-
             self.add_line(_('alias of :class:`%s`') % real_name, sourcename)
             return
 
