@@ -239,6 +239,9 @@ class TypeDocumenter(autodoc.ClassDocumenter):
         if not self.import_object():
             return
 
+        if not hasattr(self, 'itype'):
+            return autodoc.ClassDocumenter.generate(self, *args, **kwargs)
+
         real_name = idb.get_type_name(self.itype, mangle=False)
         if self.objpath[-1] != real_name:
             # This is an alias, which isn't available in C++, so we have to
