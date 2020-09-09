@@ -1,4 +1,4 @@
-__version__ = '1.0.2'
+__version__ = '1.1.0'
 __all__ = []
 
 from . import documenters
@@ -23,6 +23,6 @@ def setup(app):
     app.add_config_value('autodoc_interrogatedb_mangle_type_names', False, 'env')
     app.add_config_value('autodoc_interrogatedb_mangle_function_names', False, 'env')
     app.add_config_value('autodoc_interrogatedb_type_annotations', True, 'env')
-    app.add_config_value('autodoc_interrogatedb_add_rtype', True, 'env')
+    app.add_config_value('autodoc_interrogatedb_add_rtype', False, 'env')
 
     app.connect('config-inited', _config_inited)

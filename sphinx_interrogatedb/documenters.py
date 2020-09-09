@@ -6,6 +6,7 @@ __all__ = [
 from sphinx.ext import autodoc
 from sphinx.util import logging
 from sphinx.locale import _, __
+from docutils.parsers.rst import directives
 from panda3d.interrogatedb import *
 import types
 import builtins
@@ -58,8 +59,8 @@ class TypeDocumenter(autodoc.ClassDocumenter):
             return False
 
         # Unwrap typedef.
-        while interrogate_type_is_typedef(itype):
-            itype = interrogate_type_wrapped_type(itype)
+        #while interrogate_type_is_typedef(itype):
+        #    itype = interrogate_type_wrapped_type(itype)
 
         self.itype = itype
 
@@ -84,27 +85,53 @@ class TypeDocumenter(autodoc.ClassDocumenter):
     def add_directive_header(self, sig):
         sourcename = self.get_sourcename()
 
+        domain = getattr(self, 'domain', 'py')
+
         # Sphinx doesn't have Python enums, we'll just cheat and map it to a
         # C++ enum instead.
         if interrogate_type_is_enum(self.itype):
             self.add_line('.. cpp:enum:: ' + self.objpath[-1], sourcename)
             if self.options.noindex:
                 self.add_line('   :noindex:', sourcename)
+
+        elif domain == 'cpp' and interrogate_type_is_typedef(self.itype):
+            wrapped_itype = interrogate_type_wrapped_type(self.itype)
+            self.add_line('.. cpp:type:: {0} {1}'.format(interrogate_type_scoped_name(wrapped_itype), interrogate_type_scoped_name(self.itype)), sourcename)
+            if self.options.noindex:
+                self.add_line('   :noindex:', sourcename)
+
+        elif domain == 'cpp' and interrogate_type_is_struct(self.itype):
+            self.add_line('.. cpp:struct:: ' + interrogate_type_name(self.itype), sourcename)
+            if self.options.noindex:
+                self.add_line('   :noindex:', sourcename)
+
+        elif domain == 'cpp' and interrogate_type_is_class(self.itype):
+            self.add_line('.. cpp:class:: ' + interrogate_type_name(self.itype), sourcename)
+            if self.options.noindex:
+                self.add_line('   :noindex:', sourcename)
+
         else:
             super().add_directive_header(sig)
 
-        if not self.doc_as_attr and self.options.show_inheritance:
+        if not self.doc_as_attr and self.options.show_inheritance and not interrogate_type_is_typedef(self.itype):
             self.add_line('', sourcename)
 
             nderivs = interrogate_type_number_of_derivations(self.itype)
             if nderivs > 0:
-                bases = [
-                    ':class:`%s`' % idb.get_type_name(
-                        interrogate_type_get_derivation(self.itype, i),
-                        scoped=True,
-                        mangle=self.env.config.autodoc_interrogatedb_mangle_type_names,
-                    ) for i in range(nderivs)
-                ]
+                if domain == 'cpp':
+                    bases = [
+                        ':{}:class:`{}`'.format(domain,
+                            interrogate_type_name(interrogate_type_get_derivation(self.itype, i)).replace('<', '\\<')
+                        ) for i in range(nderivs)
+                    ]
+                else:
+                    bases = [
+                        ':{}:class:`{}`'.format(domain, idb.get_type_name(
+                            interrogate_type_get_derivation(self.itype, i),
+                            scoped=True,
+                            mangle=self.env.config.autodoc_interrogatedb_mangle_type_names,
+                        )) for i in range(nderivs)
+                    ]
                 self.add_line('   ' + _('Bases: %s') % ', '.join(bases),
                               sourcename)
 
@@ -114,10 +141,32 @@ class TypeDocumenter(autodoc.ClassDocumenter):
     def add_content(self, more_content, no_docstring=False):
         sourcename = self.get_sourcename()
 
-        real_name = idb.get_type_name(self.itype, mangle=self.env.config.autodoc_interrogatedb_mangle_type_names)
-        if real_name != self.objpath[-1]:
+        domain = getattr(self, 'domain', 'py')
+
+        if interrogate_type_is_typedef(self.itype):
             # Document as alias.
-            self.add_line(_('alias of :class:`%s`') % real_name, sourcename)
+            wrapped_itype = interrogate_type_wrapped_type(self.itype)
+            if domain == 'cpp':
+                type_name = interrogate_type_name(wrapped_itype)
+                type_name = type_name.replace('<', '\\<')
+
+                if interrogate_type_is_typedef(wrapped_itype):
+                    typ = 'type'
+                elif interrogate_type_is_enum(wrapped_itype):
+                    typ = 'enum'
+                elif interrogate_type_is_struct(wrapped_itype):
+                    typ = 'struct'
+                elif interrogate_type_is_class(wrapped_itype):
+                    typ = 'class'
+                elif interrogate_type_is_union(wrapped_itype):
+                    typ = 'union'
+                else:
+                    return
+            else:
+                type_name = idb.get_type_name(wrapped_itype, mangle=self.env.config.autodoc_interrogatedb_mangle_type_names)
+                typ = 'class'
+
+            self.add_line('alias of :{}:{}:`{}`'.format(domain, typ, type_name), sourcename)
             return
 
         super().add_content(more_content, no_docstring)
@@ -135,26 +184,32 @@ class TypeDocumenter(autodoc.ClassDocumenter):
                 self.add_line('   ' + comment.replace('// ', ' ').strip(), sourcename)
                 self.add_line('', sourcename)
 
+    def filter_members(self, members, want_all):
+        return [(a, b, False) for a, b in members]
+
     def get_object_members(self, want_all):
         ret = []
+
+        domain = getattr(self, 'domain', 'py')
 
         if interrogate_type_number_of_constructors(self.itype) > 0:
             ret.append(('__init__', IFUNC))
 
-        mangle_types = self.env.config.autodoc_interrogatedb_mangle_type_names
-        mangle_funcs = self.env.config.autodoc_interrogatedb_mangle_function_names
+        mangle_types = domain != 'cpp' and self.env.config.autodoc_interrogatedb_mangle_type_names
+        mangle_funcs = domain != 'cpp' and self.env.config.autodoc_interrogatedb_mangle_function_names
 
         for i in range(interrogate_type_number_of_methods(self.itype)):
             ifunc = interrogate_type_get_method(self.itype, i)
             ret.append((idb.get_function_name(ifunc, mangle=mangle_funcs), IFUNC))
 
-        for i in range(interrogate_type_number_of_make_seqs(self.itype)):
-            iseq = interrogate_type_get_make_seq(self.itype, i)
-            ret.append((idb.get_make_seq_name(iseq, mangle=mangle_funcs), IMSEQ))
+        if domain == 'py':
+            for i in range(interrogate_type_number_of_make_seqs(self.itype)):
+                iseq = interrogate_type_get_make_seq(self.itype, i)
+                ret.append((idb.get_make_seq_name(iseq, mangle=mangle_funcs), IMSEQ))
 
-        for i in range(interrogate_type_number_of_elements(self.itype)):
-            ielem = interrogate_type_get_element(self.itype, i)
-            ret.append((idb.get_element_name(ielem), IELEM))
+            for i in range(interrogate_type_number_of_elements(self.itype)):
+                ielem = interrogate_type_get_element(self.itype, i)
+                ret.append((idb.get_element_name(ielem), IELEM))
 
         for i in range(interrogate_type_number_of_nested_types(self.itype)):
             itype2 = interrogate_type_get_nested_type(self.itype, i)
@@ -164,6 +219,65 @@ class TypeDocumenter(autodoc.ClassDocumenter):
             ret.append((idb.get_type_name(itype2, mangle=mangle_types), ITYPE))
 
         return False, ret
+
+    def generate(self, *args, **kwargs):
+        if not hasattr(self, 'domain'):
+            domain = self.env.temp_data.get('default_domain')
+            if domain:
+                self.domain = domain.name
+
+        if not self.parse_name():
+            # need a module to import
+            logger.warning(
+                __('don\'t know which module to import for autodocumenting '
+                   '%r (try placing a "module" or "currentmodule" directive '
+                   'in the document, or giving an explicit module name)') %
+                self.name, type='autodoc')
+            return
+
+        # now, import the module and get object to document
+        if not self.import_object():
+            return
+
+        real_name = idb.get_type_name(self.itype, mangle=False)
+        if self.objpath[-1] != real_name:
+            # This is an alias, which isn't available in C++, so we have to
+            # just redirect to the right page or something.
+            sourcename = self.get_sourcename()
+            self.add_line('', sourcename)
+
+            domain = getattr(self, 'domain', 'py')
+            if domain == 'cpp':
+                cpp_name = interrogate_type_name(self.itype)
+
+                if interrogate_type_is_typedef(self.itype):
+                    typ = 'type'
+                elif interrogate_type_is_enum(self.itype):
+                    typ = 'enum'
+                elif interrogate_type_is_struct(self.itype):
+                    typ = 'struct'
+                elif interrogate_type_is_class(self.itype):
+                    typ = 'class'
+                elif interrogate_type_is_union(self.itype):
+                    typ = 'union'
+                else:
+                    return
+
+                self.add_line('See :cpp:{}:`{}`'.format(typ, cpp_name.replace('<', '\\<')), sourcename)
+            else:
+                self.add_line('.. class:: ' + self.objpath[-1], sourcename)
+                self.add_line('', sourcename)
+                self.indent += self.content_indent
+                if interrogate_type_is_enum(self.itype):
+                    self.add_line('alias of :cpp:enum:`{}`'.format(real_name), sourcename)
+                else:
+                    self.add_line('alias of :{}:class:`{}`'.format(domain, real_name), sourcename)
+                self.indent = self.indent[:-len(self.content_indent)]
+
+            self.add_line('', sourcename)
+            return
+
+        super().generate(*args, **kwargs)
 
 
 class FunctionDocumenter(autodoc.FunctionDocumenter):
@@ -227,8 +341,8 @@ class FunctionDocumenter(autodoc.FunctionDocumenter):
                     sig += self._format_arg_type(interrogate_wrapper_parameter_type(iwrap, i))
         sig += ")"
 
-        if show_types:
-            if self.objpath[-1] != '__init__' and interrogate_wrapper_has_return_value(iwrap):
+        if show_types and self.objpath[-1] != '__init__':
+            if interrogate_wrapper_has_return_value(iwrap):
                 sig += " -> " + self._format_arg_type(interrogate_wrapper_return_type(iwrap))
             else:
                 sig += " -> None"
@@ -236,6 +350,10 @@ class FunctionDocumenter(autodoc.FunctionDocumenter):
         return sig
 
     def _format_arg_type(self, itype):
+        domain = getattr(self, 'domain', 'py')
+        if domain == 'cpp':
+            return interrogate_type_scoped_name(itype)
+
         # Unwrap the type.
         while interrogate_type_is_wrapped(itype):
             itype = interrogate_type_wrapped_type(itype)
@@ -248,8 +366,12 @@ class FunctionDocumenter(autodoc.FunctionDocumenter):
         elif orig_name == "vector_uchar":
             return "bytes"
 
-        if interrogate_type_is_atomic(itype):
-            token = interrogate_type_atomic_token(itype)
+        unwrapped_itype = itype
+        while interrogate_type_is_typedef(unwrapped_itype):
+            unwrapped_itype = interrogate_type_wrapped_type(unwrapped_itype)
+
+        if interrogate_type_is_atomic(unwrapped_itype):
+            token = interrogate_type_atomic_token(unwrapped_itype)
             if token == 1:
                 return 'int'
             elif token == 2 or token == 3:
@@ -261,9 +383,15 @@ class FunctionDocumenter(autodoc.FunctionDocumenter):
             elif token == 8:
                 return 'int'
 
-        return idb.get_type_name(
+        type_name = idb.get_type_name(
             itype,
             mangle=self.env.config.autodoc_interrogatedb_mangle_type_names)
+
+        if domain == 'py':
+            if interrogate_function_module_name(self.ifunc) != interrogate_type_module_name(itype):
+                return interrogate_type_module_name(itype) + '.' + type_name
+
+        return type_name
 
     def add_directive_header(self, sig):
         super().add_directive_header(sig)
@@ -318,13 +446,84 @@ class FunctionDocumenter(autodoc.FunctionDocumenter):
             if not self.check_module():
                 return
 
+        domain = getattr(self, 'domain', None)
+        if not domain:
+            domain = self.env.temp_data.get('default_domain')
+            domain = domain.name if domain else 'py'
+
         # Do not show this if this is a mere alias.
-        if self.objpath[-1] != '__init__':
-            real_name = idb.get_function_name(self.ifunc, mangle=self.env.config.autodoc_interrogatedb_mangle_function_names)
-            if self.objpath[-1] != real_name:
+        if domain == 'cpp':
+            real_name = interrogate_function_name(self.ifunc)
+            if real_name.startswith('__') and real_name.endswith('__'):
+                # This is meant for Python.
                 return
+        else:
+            real_name = idb.get_function_name(self.ifunc, mangle=self.env.config.autodoc_interrogatedb_mangle_function_names)
+
+        if self.objpath[-1] != '__init__' and self.objpath[-1] != real_name:
+            return
 
         sourcename = self.get_sourcename()
+
+        if domain == 'cpp':
+            # List the C++ methods instead.
+            sigs = interrogate_function_prototype(self.ifunc).strip()
+            if not sigs:
+                return
+
+            itype = interrogate_function_class(self.ifunc)
+            if itype:
+                prefix = interrogate_type_scoped_name(itype) + '::'
+                prefix = prefix.replace('< std::', '< ')
+            else:
+                prefix = ''
+
+            for sig in sigs.splitlines():
+                if not sig:
+                    continue
+
+                if prefix:
+                    # Hack to get rid of extra scoping.
+                    if sig.startswith(prefix):
+                        sig = sig[len(prefix):]
+
+                    sig = sig.replace(' ' + prefix, ' ')
+                    sig = sig.replace('&' + prefix, ' &')
+                    sig = sig.replace('*' + prefix, ' *')
+                    sig = sig.replace(' ::' + prefix, ' ')
+                    sig = sig.replace('&::' + prefix, ' &')
+                    sig = sig.replace('*::' + prefix, ' *')
+
+                # The inline keyword isn't really interesting to report.
+                if sig.startswith("inline "):
+                    sig = sig[7:]
+                elif sig.startswith("static inline "):
+                    sig = sig[14:]
+
+                sig = sig.rstrip(';')
+                self.add_line('', sourcename)
+                self.add_line('.. cpp:function:: {}'.format(sig), sourcename)
+
+            self.add_line('', sourcename)
+
+            self.indent += self.content_indent
+
+            docstrings = []
+            if interrogate_function_has_comment(self.ifunc):
+                comment = interrogate_function_comment(self.ifunc) + '\n\n'
+                # If it repeats itself, get the first repetition only.
+                comment = comment[:(comment + comment).find(comment, 1, -1)]
+                docstrings.append(comment.strip().splitlines())
+            if not docstrings:
+                # append at least a dummy docstring, so that the event
+                # autodoc-process-docstring is fired and can add some
+                # content if desired
+                docstrings.append([])
+            for i, line in enumerate(self.process_doc(docstrings)):
+                self.add_line(line, sourcename, i)
+
+            self.indent = self.indent[:-len(self.content_indent)]
+            return
 
         # Output each overload separately.
         for i in range(interrogate_function_number_of_python_wrappers(self.ifunc)):
@@ -446,20 +645,23 @@ class ElementDocumenter(autodoc.ClassLevelDocumenter):
         self.add_line('   :property:', sourcename)
 
     def format_args(self):
-        #XXX do we want annotations for properties?
-        #if self.env.config.autodoc_interrogatedb_type_annotations:
-        return ""
+        if not self.env.config.autodoc_interrogatedb_type_annotations:
+            return ""
 
         itype = interrogate_element_type(self.ielem)
         if itype:
             type_name = self._format_type(itype)
             if type_name:
                 if interrogate_element_is_sequence(self.ielem):
-                    return " -> Sequence[{0}]".format(type_name)
+                    return "() -> Sequence[{0}]".format(type_name)
                 else:
-                    return " -> " + type_name
+                    return "() -> " + type_name
 
     def _format_type(self, itype):
+        domain = getattr(self, 'domain', 'py')
+        if domain == 'cpp':
+            return interrogate_type_scoped_name(itype)
+
         # Unwrap the type.
         while interrogate_type_is_wrapped(itype):
             itype = interrogate_type_wrapped_type(itype)
@@ -472,8 +674,12 @@ class ElementDocumenter(autodoc.ClassLevelDocumenter):
         elif orig_name == "vector_uchar":
             return "bytes"
 
-        if interrogate_type_is_atomic(itype):
-            token = interrogate_type_atomic_token(itype)
+        unwrapped_itype = itype
+        while interrogate_type_is_typedef(unwrapped_itype):
+            unwrapped_itype = interrogate_type_wrapped_type(unwrapped_itype)
+
+        if interrogate_type_is_atomic(unwrapped_itype):
+            token = interrogate_type_atomic_token(unwrapped_itype)
             if token == 1:
                 return 'int'
             elif token == 2 or token == 3:
