@@ -177,11 +177,21 @@ def _refresh_cache():
             # Store it by both the original and mangled name.
             name = interrogate_function_name(ifunc)
             mangled_name1 = _translate_function_name(name, False)
-            mangled_name2 = _translate_function_name(name, True)
             _func_cache[(parent, mangled_name1)] = ifunc
-            _func_cache[(parent, mangled_name2)] = ifunc
+            if not name.startswith('~'):
+                mangled_name2 = _translate_function_name(name, True)
+                _func_cache[(parent, mangled_name2)] = ifunc
 
         _num_funcs = num_funcs
+
+
+def _get_ancestor_types(itype):
+    """Returns all derived types of the given type."""
+
+    for i in range(interrogate_type_number_of_derivations(itype)):
+        ibase = interrogate_type_get_derivation(itype, i)
+        yield ibase
+        yield from _get_ancestor_types(ibase)
 
 
 def lookup_type(module, path):
@@ -206,8 +216,20 @@ def lookup_function(module, path):
             return interrogate_type_get_constructor(itype, 0)
     else:
         itype = module
+
     _refresh_cache()
-    return _func_cache.get((itype, path[-1]))
+    result = _func_cache.get((itype, path[-1]))
+    if result:
+        return result
+
+    if itype != module:
+        # Try looking up in base types.
+        for ibase in _get_ancestor_types(itype):
+            result = _func_cache.get((ibase, path[-1]))
+            if result:
+                return result
+
+    return None
 
 
 def lookup_make_seq(module, path):
@@ -265,7 +287,7 @@ def get_type_name(itype, *, scoped=False, mangle=False):
     if scoped:
         parent = interrogate_type_outer_class(itype)
         if parent:
-            name = get_type_name(parent, scoped=True, mangle=mangle) + name
+            name = get_type_name(parent, scoped=True, mangle=mangle) + '.' + name
 
     return name
 
@@ -279,7 +301,7 @@ def get_function_name(ifunc, *, scoped=False, mangle=False):
     if scoped:
         parent = interrogate_function_class(ifunc)
         if parent:
-            name = get_type_name(parent, scoped=True, mangle=mangle) + name
+            name = get_type_name(parent, scoped=True, mangle=mangle) + '.' + name
 
     return name
 

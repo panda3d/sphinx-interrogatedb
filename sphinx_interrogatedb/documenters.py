@@ -728,17 +728,44 @@ class ElementDocumenter(autodoc.ClassLevelDocumenter):
         if getter_doc or setter_doc:
             self.add_line('', sourcename)
 
-        if getter_doc and setter_doc:
-            # Show both getter and setter docs if we have both.
-            self.add_line("Getter", sourcename)
-            docstrings = [getter_doc.splitlines()]
-            for line in self.process_doc(docstrings):
-                self.add_line('   ' + line, sourcename)
+        if getter_doc and setter_doc and getter_doc != setter_doc:
+            # In many methods, the only difference between the getter/setter doc
+            # is the first word.  If that is so, we can combine the two.
+            getter_words = getter_doc.strip().split(' ')
+            setter_words = setter_doc.strip().split(' ')
+            combined_words = []
+            num_different_words = 0
+            if len(getter_words) == len(setter_words):
+                for getter_word, setter_word in zip(getter_words, setter_words):
+                    if getter_word == setter_word:
+                        combined_words.append(getter_word)
+                    elif not getter_word or not setter_word:
+                        word = getter_word or setter_word
+                        combined_words.append('(' + word + ')')
+                        num_different_words += 1
+                    else:
+                        combined_words.append(getter_word + '/' + setter_word)
+                        num_different_words += 1
+            else:
+                num_different_words = len(combined_words)
 
-            self.add_line("Setter", sourcename)
-            docstrings = [setter_doc.splitlines()]
-            for line in self.process_doc(docstrings):
-                self.add_line('   ' + line, sourcename)
+            # Do this only if at most a third of the words have a slash.
+            if combined_words and (num_different_words * 3) / len(combined_words) <= 1:
+                doc = ' '.join(combined_words)
+                docstrings = [doc.splitlines()]
+                for line in self.process_doc(docstrings):
+                    self.add_line(line, sourcename)
+            else:
+                # Show both getter and setter docs.
+                self.add_line("Getter", sourcename)
+                docstrings = [getter_doc.splitlines()]
+                for line in self.process_doc(docstrings):
+                    self.add_line('   ' + line, sourcename)
+
+                self.add_line("Setter", sourcename)
+                docstrings = [setter_doc.splitlines()]
+                for line in self.process_doc(docstrings):
+                    self.add_line('   ' + line, sourcename)
 
         elif getter_doc or setter_doc:
             # If we have only one, just show it normally.
