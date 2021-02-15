@@ -347,8 +347,8 @@ class FunctionDocumenter(autodoc.FunctionDocumenter):
         if show_types and self.objpath[-1] != '__init__':
             if interrogate_wrapper_has_return_value(iwrap):
                 sig += " -> " + self._format_arg_type(interrogate_wrapper_return_type(iwrap))
-            else:
-                sig += " -> None"
+            #else:
+            #    sig += " -> None"
 
         return sig
 
@@ -727,6 +727,16 @@ class ElementDocumenter(autodoc.ClassLevelDocumenter):
 
         if getter_doc or setter_doc:
             self.add_line('', sourcename)
+
+        if getter_doc and setter_doc:
+            # If the getter just contains "see setter()" or similar, strip it.
+            # It's not useful when generating the property docstring.
+            getter_name = interrogate_function_name(getter)
+            setter_name = interrogate_function_name(setter)
+            if getter_doc.lower().strip('\n\t ().;,:\\@/*!') in ('see ' + setter_name.lower(), 'sa ' + setter_name.lower(), 'copydoc ' + setter_name.lower()):
+                getter_doc = ""
+            if setter_doc.lower().strip('\n\t ().;,:\\@/*!') in ('see ' + getter_name.lower(), 'sa ' + getter_name.lower(), 'copydoc ' + getter_name.lower()):
+                setter_doc = ""
 
         if getter_doc and setter_doc and getter_doc != setter_doc:
             # In many methods, the only difference between the getter/setter doc
