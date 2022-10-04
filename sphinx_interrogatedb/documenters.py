@@ -3,6 +3,7 @@ __all__ = [
     "ElementDocumenter",
 ]
 
+import sphinx
 from sphinx.ext import autodoc
 from sphinx.util import logging
 from sphinx.locale import _, __
@@ -169,7 +170,7 @@ class TypeDocumenter(autodoc.ClassDocumenter):
             self.add_line('alias of :{}:{}:`{}`'.format(domain, typ, type_name), sourcename)
             return
 
-        super().add_content(more_content, no_docstring)
+        super().add_content(more_content)
 
         if interrogate_type_is_enum(self.itype):
             for i in range(interrogate_type_number_of_enum_values(self.itype)):
@@ -419,6 +420,9 @@ class FunctionDocumenter(autodoc.FunctionDocumenter):
     def get_doc(self):
         return [interrogate_function_comment(self.ifunc).splitlines() + ['']]
 
+    def get_object_members(self, want_all):
+        return False, []
+
     def generate(self, more_content=None, real_modname=None,
                  check_module=False, all_members=False):
         if not self.parse_name():
@@ -613,6 +617,9 @@ class MakeSeqDocumenter(autodoc.ClassLevelDocumenter):
     def get_doc(self):
         return [interrogate_make_seq_comment(self.iseq).splitlines() + ['']]
 
+    def get_object_members(self, want_all):
+        return False, []
+
 
 class ElementDocumenter(autodoc.ClassLevelDocumenter):
     """
@@ -620,7 +627,11 @@ class ElementDocumenter(autodoc.ClassLevelDocumenter):
     """
 
     objtype = 'ielement'
-    directivetype = 'method'
+
+    if sphinx.version_info < (4, 0, 0):
+        directivetype = 'method'
+    else:
+        directivetype = 'property'
 
     # Rank this higher than the built-in documenters.
     priority = 20
@@ -644,8 +655,10 @@ class ElementDocumenter(autodoc.ClassLevelDocumenter):
     def add_directive_header(self, sig):
         super().add_directive_header(sig)
 
-        sourcename = self.get_sourcename()
-        self.add_line('   :property:', sourcename)
+        if self.directivetype == 'method':
+            # For sphinx<4.0.0
+            sourcename = self.get_sourcename()
+            self.add_line('   :property:', sourcename)
 
     def format_args(self):
         if not self.env.config.autodoc_interrogatedb_type_annotations:
@@ -708,7 +721,7 @@ class ElementDocumenter(autodoc.ClassLevelDocumenter):
         return docstrings
 
     def add_content(self, more_content=[], no_docstring=False):
-        super().add_content(more_content, no_docstring)
+        super().add_content(more_content)
 
         sourcename = self.get_sourcename()
 
@@ -799,3 +812,6 @@ class ElementDocumenter(autodoc.ClassLevelDocumenter):
                     self.add_line('', sourcename)
                     self.add_line(line, sourcename)
                     self.add_line('', sourcename)
+
+    def get_object_members(self, want_all):
+        return False, []
