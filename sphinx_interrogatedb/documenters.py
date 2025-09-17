@@ -8,7 +8,7 @@ from sphinx.ext import autodoc
 from sphinx.util import logging
 from sphinx.locale import _, __
 from docutils.parsers.rst import directives
-from panda3d.interrogatedb import *
+from interrogatedb import *
 import types
 import builtins
 

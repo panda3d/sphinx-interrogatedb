@@ -2,7 +2,7 @@
 
 __all__ = []
 
-from panda3d.interrogatedb import *
+from interrogatedb import *
 import keyword
 
 

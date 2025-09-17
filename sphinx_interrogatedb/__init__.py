@@ -6,7 +6,7 @@ from . import documenters
 
 def _config_inited(app, config):
     # Add the search path from config to interrogatedb.
-    from panda3d import interrogatedb as idb
+    import interrogatedb as idb
 
     for dir in config.interrogatedb_search_path:
         idb.interrogate_add_search_directory(dir)
